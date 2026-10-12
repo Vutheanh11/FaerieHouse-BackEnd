@@ -40,9 +40,16 @@ test("member and event data match the current 2026 site", async () => {
   assert.equal(events.total, 7);
   assert.equal(events.events[0].date, "02.07");
   assert.equal(events.events[6].date, "04.09");
+  assert.deepEqual(events.availableYears, ["2026"]);
+  assert.equal(events.events[0].title, "Khởi động đội ngũ Faerie");
+  assert.equal(events.events[3].title, "Kick Off Faerie 2026");
   const news = await (await fetch(`${baseUrl}/api/v1/news`)).json();
   assert.equal(news.total, 7);
   assert.equal(news.news[0].date, "04.09");
+  assert.deepEqual(news.availableYears, ["2026"]);
+  assert.equal((await (await fetch(`${baseUrl}/api/v1/news?year=2025`)).json()).total, 0);
+  assert.equal((await (await fetch(`${baseUrl}/api/v1/events?year=2025`)).json()).total, 0);
+  assert.equal((await fetch(`${baseUrl}/api/v1/news?year=next`)).status, 400);
   const popup = await (await fetch(`${baseUrl}/api/v1/popup`)).json();
   assert.equal(popup.popup.enabled, popupConfig.enabled);
   assert.equal(popup.popup.title, popupConfig.title);
@@ -75,6 +82,24 @@ test("new popup images are served from GitHub before Render redeploys", async ()
   } finally {
     imageServer.close();
     await once(imageServer, "close");
+  }
+});
+
+test("news archive exposes additional years when an admin post is published", async () => {
+  const archiveServer = createApiServer({ newsPosts: [{ id: "archive-2025", date: "01.09", year: "2025", title: "Một câu chuyện cũ", description: "Lưu lại hành trình", images: [] }] });
+  archiveServer.listen(0, "127.0.0.1");
+  await once(archiveServer, "listening");
+  try {
+    const archiveUrl = `http://127.0.0.1:${archiveServer.address().port}/api/v1/news`;
+    const all = await (await fetch(archiveUrl)).json();
+    assert.deepEqual(all.availableYears, ["2026", "2025"]);
+    assert.equal(all.total, 8);
+    const older = await (await fetch(`${archiveUrl}?year=2025`)).json();
+    assert.equal(older.total, 1);
+    assert.equal(older.news[0].id, "archive-2025");
+  } finally {
+    archiveServer.close();
+    await once(archiveServer, "close");
   }
 });
 

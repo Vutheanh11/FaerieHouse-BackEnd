@@ -2,7 +2,7 @@ import { createServer as createHttpServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { events2026, members2026, popupConfig, posts2026 } from "./data.mjs";
+import { events2026, members2026, popupConfig, posts } from "./data.mjs";
 import { createAdminApi } from "./admin.mjs";
 
 const defaultOrigins = "https://faeriehouse.onrender.com,https://faeriehouse-admin.onrender.com,https://vutheanh11.github.io";
@@ -29,7 +29,7 @@ function sendJson(response, status, body, method = "GET", privateResponse = fals
   response.end(method === "HEAD" ? undefined : payload);
 }
 
-export function createApiServer({ adminOptions, imageFetch = fetch, imageToken = process.env.GITHUB_TOKEN } = {}) {
+export function createApiServer({ adminOptions, imageFetch = fetch, imageToken = process.env.GITHUB_TOKEN, newsPosts = posts } = {}) {
   const handleAdmin = createAdminApi(adminOptions);
   return createHttpServer(async (request, response) => {
     const origin = request.headers.origin;
@@ -78,30 +78,34 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
       sendJson(response, 200, {
         service: "Faerie News API",
         version: "v1",
-        endpoints: ["/api/health", "/api/v1/members?year=2026", "/api/v1/events?year=2026", "/api/v1/news", "/api/v1/popup"],
+        endpoints: ["/api/health", "/api/v1/members?year=2026", "/api/v1/events?year=2026", "/api/v1/news?year=2026", "/api/v1/popup"],
       }, request.method);
       return;
     }
-    if (pathname === "/api/v1/members" || pathname === "/api/v1/events") {
+    if (pathname === "/api/v1/members") {
       if (searchParams.has("year") && searchParams.get("year") !== "2026") {
-        sendJson(response, 400, { error: "Only year 2026 is available" }, request.method);
+        sendJson(response, 400, { error: "Only year 2026 is available for members" }, request.method);
         return;
       }
-      if (pathname.endsWith("/members")) {
-        const members = members2026.map((person) => ({ ...person, photo: publicAsset(person.photo) }));
-        sendJson(response, 200, { year: 2026, total: members.length, members }, request.method);
-      } else {
-        const events = events2026.map((event) => ({ ...event, images: event.images.map(publicAsset) }));
-        sendJson(response, 200, { year: 2026, total: events.length, events }, request.method);
-      }
+      const members = members2026.map((person) => ({ ...person, cohort: person.cohort || "2026", photo: publicAsset(person.photo) }));
+      sendJson(response, 200, { year: 2026, total: members.length, members }, request.method);
       return;
     }
-    if (pathname === "/api/v1/news") {
+    if (pathname === "/api/v1/events" || pathname === "/api/v1/news") {
+      const selectedYear = searchParams.get("year");
+      if (selectedYear !== null && !/^\d{4}$/.test(selectedYear)) {
+        sendJson(response, 400, { error: "Year must contain four digits" }, request.method);
+        return;
+      }
+      const allItems = pathname.endsWith("/events") ? events2026 : [...newsPosts, ...events2026];
+      const availableYears = [...new Set(allItems.map((item) => String(item.year)))].sort((first, second) => Number(second) - Number(first));
       const dateValue = (item) => Number(`${item.year}${item.date.slice(3, 5)}${item.date.slice(0, 2)}`);
-      const news = [...posts2026, ...events2026]
-        .sort((first, second) => dateValue(second) - dateValue(first))
+      const items = allItems
+        .filter((item) => selectedYear === null || String(item.year) === selectedYear)
+        .sort((first, second) => pathname.endsWith("/events") ? dateValue(first) - dateValue(second) : dateValue(second) - dateValue(first))
         .map((item) => ({ ...item, images: (item.images ?? []).map(publicAsset) }));
-      sendJson(response, 200, { year: 2026, total: news.length, news }, request.method);
+      const key = pathname.endsWith("/events") ? "events" : "news";
+      sendJson(response, 200, { year: selectedYear ? Number(selectedYear) : null, availableYears, total: items.length, [key]: items }, request.method);
       return;
     }
     if (pathname === "/api/v1/popup") {
