@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: faerienews-backend
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: FRONTEND_SITE_URL
+        value: https://faeriehouse.onrender.com/
+      - key: CORS_ORIGINS
+        value: https://faeriehouse.onrender.com,https://faeriehouse-admin.onrender.com,https://vutheanh11.github.io
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: ADMIN_SESSION_SECRET
+        generateValue: true
