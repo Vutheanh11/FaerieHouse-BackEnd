@@ -8,7 +8,7 @@ Public endpoints: `GET /api/health`, `GET /api/v1/members?year=2026`, `GET /api/
 
 ## Production configuration
 
-In Render **faerienews-backend → Environment**, set `DATABASE_URL` to the Neon pooled PostgreSQL URI, alongside `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `ADMIN_SESSION_SECRET`. Keep these values secret and never commit them. When `DATABASE_URL` is present, the API uses PostgreSQL exclusively for mutable data. Without it, the previous GitHub JSON storage remains available as a temporary fallback; `GITHUB_TOKEN` is required only for that fallback and older popup image URLs.
+In Render **faerienews-backend → Environment**, upload a secret file named `.env.local` containing `DATABASE_URL=<Neon pooled PostgreSQL URI>`. The Blueprint's start command reads `/etc/secrets/.env.local` at runtime. Keep this file and `ADMIN_USERNAME`, `ADMIN_PASSWORD`, and `ADMIN_SESSION_SECRET` secret; never commit them. Alternatively, set `DATABASE_URL` directly as a Render environment variable. When `DATABASE_URL` is present, the API uses PostgreSQL exclusively for mutable data. Without it, the previous GitHub JSON storage remains available as a temporary fallback; `GITHUB_TOKEN` is required only for that fallback and older popup image URLs.
 
 The schema is in `sql/001_initial.sql`. `scripts/migrate-to-neon.mjs` copies the existing JSON and member/popup images into an **empty** database; it aborts if any database rows already exist. Do not run it again after Admin has made changes. `.env.local` is ignored by Git and must never be uploaded. `GET /api/health` reports `storage: "postgres"` once the live service is connected.
 

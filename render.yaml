@@ -4,7 +4,7 @@ services:
     runtime: node
     plan: free
     buildCommand: npm ci
-    startCommand: npm start
+    startCommand: node --env-file-if-exists=/etc/secrets/.env.local src/server.mjs
     healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
