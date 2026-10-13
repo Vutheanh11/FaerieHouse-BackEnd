@@ -1,5 +1,6 @@
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
+import { promisify } from "node:util";
 import sharp from "sharp";
 
 const repository = "Vutheanh11/FaerieHouse-BackEnd";
@@ -9,6 +10,22 @@ const maxUploadBodyBytes = 28_000_000;
 const maxSourceImageBytes = 20_000_000;
 const maxSavedImageBytes = 3_000_000;
 const sessionLifetimeMs = 12 * 60 * 60 * 1000;
+const deriveKey = promisify(scrypt);
+
+export async function hashAdminPassword(password) {
+  const salt = randomBytes(16).toString("base64url");
+  const key = await deriveKey(password, salt, 64);
+  return `scrypt$${salt}$${key.toString("base64url")}`;
+}
+
+async function verifyAdminPassword(password, storedHash) {
+  const match = /^scrypt\$([A-Za-z0-9_-]+)\$([A-Za-z0-9_-]+)$/.exec(storedHash ?? "");
+  if (!match) return false;
+  const expected = Buffer.from(match[2], "base64url");
+  if (expected.length !== 64) return false;
+  const actual = await deriveKey(password, match[1], expected.length);
+  return timingSafeEqual(actual, expected);
+}
 
 function validPopup(data) {
   if (!data || typeof data !== "object" || Array.isArray(data) || typeof data.enabled !== "boolean") return false;
@@ -25,6 +42,29 @@ function validPopup(data) {
     }
   } catch { return false; }
   return true;
+}
+
+function validPost(post) {
+  if (!post || typeof post !== "object" || Array.isArray(post) ||
+      typeof post.id !== "string" || !/^[a-f0-9-]{36}$/.test(post.id) ||
+      typeof post.date !== "string" || !/^\d{2}\.\d{2}$/.test(post.date) ||
+      typeof post.year !== "string" || !/^\d{4}$/.test(post.year) ||
+      typeof post.title !== "string" || !post.title.trim() || post.title.length > 100 ||
+      typeof post.description !== "string" || post.description.length > 300 ||
+      typeof post.tag !== "string" || post.tag.length > 30 ||
+      typeof post.location !== "string" || post.location.length > 100 ||
+      !Array.isArray(post.images) || post.images.length > 4 ||
+      !post.images.every((image) => typeof image === "string" && image.length <= 600 && /^https:\/\//.test(image)) ||
+      !Array.isArray(post.bodyBlocks) || !post.bodyBlocks.length) return false;
+  let textLength = 0;
+  for (const block of post.bodyBlocks) {
+    if (!block || !Array.isArray(block.runs) || block.runs.length > 200) return false;
+    for (const run of block.runs) {
+      if (typeof run?.text !== "string" || run.text.length > 10_000) return false;
+      textLength += run.text.length;
+    }
+  }
+  return textLength > 0 && textLength <= 10_000;
 }
 
 function constantTimeEqual(first, second) {
@@ -69,7 +109,7 @@ function readBody(request, limit = maxBodyBytes) {
 
 export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () => Date.now(), database = null } = {}) {
   const attempts = new Map();
-  const ready = () => Boolean(env.ADMIN_USERNAME && env.ADMIN_PASSWORD && env.ADMIN_SESSION_SECRET && (database || env.GITHUB_TOKEN));
+  const ready = () => Boolean(env.ADMIN_SESSION_SECRET && (database?.getAdminUser || (env.ADMIN_USERNAME && env.ADMIN_PASSWORD)) && (database || env.GITHUB_TOKEN));
   const githubHeaders = () => ({
     Accept: "application/vnd.github+json",
     Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -139,28 +179,39 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
     return { image: `https://faerienews-backend.onrender.com/api/v1/popup-images/${filename}` };
   }
 
-  function signSession() {
-    const payload = Buffer.from(JSON.stringify({ u: env.ADMIN_USERNAME, exp: now() + sessionLifetimeMs, n: randomUUID() })).toString("base64url");
+  function signSession(user) {
+    const expiresAt = now() + sessionLifetimeMs;
+    const payload = Buffer.from(JSON.stringify({ u: user.username, r: user.role, s: user.source, v: user.sessionVersion ?? 0, exp: expiresAt, n: randomUUID() })).toString("base64url");
     const signature = createHmac("sha256", env.ADMIN_SESSION_SECRET).update(payload).digest("base64url");
-    return { token: `${payload}.${signature}`, expiresAt: now() + sessionLifetimeMs };
+    return { token: `${payload}.${signature}`, expiresAt, username: user.username, role: user.role, accountType: user.source };
   }
 
-  function authenticated(request) {
+  async function authenticated(request) {
     const authorization = request.headers.authorization ?? "";
     const match = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(authorization);
-    if (!match) return false;
+    if (!match) return null;
     const signature = createHmac("sha256", env.ADMIN_SESSION_SECRET).update(match[1]).digest("base64url");
-    if (!constantTimeEqual(signature, match[2])) return false;
+    if (!constantTimeEqual(signature, match[2])) return null;
     try {
       const payload = JSON.parse(Buffer.from(match[1], "base64url").toString("utf8"));
-      return payload.u === env.ADMIN_USERNAME && Number.isFinite(payload.exp) && payload.exp > now();
-    } catch { return false; }
+      if (!Number.isFinite(payload.exp) || payload.exp <= now() || typeof payload.u !== "string") return null;
+      if (payload.s === "database" && database?.getAdminUser) {
+        const user = await database.getAdminUser(payload.u);
+        return user && !user.disabled && user.role === payload.r && user.session_version === payload.v
+          ? { username: user.username, role: user.role, source: "database", sessionVersion: user.session_version, passwordHash: user.password_hash }
+          : null;
+      }
+      if (payload.s === "legacy" && payload.u === env.ADMIN_USERNAME && payload.r === "super") {
+        return { username: env.ADMIN_USERNAME, role: "super", source: "legacy" };
+      }
+      return null;
+    } catch { return null; }
   }
 
-  async function appendLoginLog(request) {
+  async function appendLoginLog(request, username) {
     const entry = {
       time: new Date(now()).toISOString(),
-      username: env.ADMIN_USERNAME,
+      username,
       ip: clientIp(request),
       device: deviceLabel(request.headers["user-agent"]),
     };
@@ -190,20 +241,69 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
           return true;
         }
         const body = await readBody(request);
-        if (!body || typeof body.username !== "string" || typeof body.password !== "string" ||
-            !constantTimeEqual(body.username, env.ADMIN_USERNAME) || !constantTimeEqual(body.password, env.ADMIN_PASSWORD)) {
+        let user = null;
+        if (body && typeof body.username === "string" && typeof body.password === "string" && body.password.length <= 200) {
+          const stored = database?.getAdminUser ? await database.getAdminUser(body.username) : null;
+          if (stored && !stored.disabled && await verifyAdminPassword(body.password, stored.password_hash)) {
+            user = { username: stored.username, role: stored.role, source: "database", sessionVersion: stored.session_version };
+          } else if (!stored && env.ADMIN_USERNAME && env.ADMIN_PASSWORD &&
+                     constantTimeEqual(body.username, env.ADMIN_USERNAME) && constantTimeEqual(body.password, env.ADMIN_PASSWORD)) {
+            user = { username: env.ADMIN_USERNAME, role: "super", source: "legacy" };
+          }
+        }
+        if (!user) {
           const count = record.until > now() - 15 * 60 * 1000 ? record.count + 1 : 1;
           attempts.set(ip, { count, until: count >= 5 ? now() + 15 * 60 * 1000 : now() });
           send(401, { error: "Username hoặc Password không đúng." });
           return true;
         }
         attempts.delete(ip);
-        await appendLoginLog(request);
-        send(200, signSession());
+        await appendLoginLog(request, user.username);
+        send(200, signSession(user));
         return true;
       }
-      if (!authenticated(request)) {
+      const user = await authenticated(request);
+      if (!user) {
         send(401, { error: "Phiên đăng nhập đã hết hạn. Hãy đăng nhập lại." });
+        return true;
+      }
+      if (pathname === "/api/v1/admin/change-password" && request.method === "POST") {
+        if (user.source !== "database" || !database?.changeAdminPassword) {
+          send(403, { error: "Tài khoản Render cũ chỉ đổi mật khẩu trong Render Environment." });
+          return true;
+        }
+        const body = await readBody(request);
+        if (typeof body?.currentPassword !== "string" || typeof body?.newPassword !== "string" ||
+            body.newPassword.length < 12 || body.newPassword.length > 200) {
+          send(400, { error: "Mật khẩu mới cần từ 12 đến 200 ký tự." });
+          return true;
+        }
+        if (!await verifyAdminPassword(body.currentPassword, user.passwordHash)) {
+          send(401, { error: "Mật khẩu hiện tại không đúng." });
+          return true;
+        }
+        const updated = await database.changeAdminPassword(user.username, await hashAdminPassword(body.newPassword), user.sessionVersion);
+        send(200, signSession({ username: updated.username, role: updated.role, source: "database", sessionVersion: updated.session_version }));
+        return true;
+      }
+      if (pathname === "/api/v1/admin/users" && request.method === "GET") {
+        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được xem tài khoản." }); return true; }
+        if (!database?.listAdminUsers) { send(503, { error: "Cần kết nối database để quản lý tài khoản." }); return true; }
+        send(200, { users: await database.listAdminUsers() });
+        return true;
+      }
+      if (pathname === "/api/v1/admin/users" && request.method === "POST") {
+        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được tạo admin nhỏ." }); return true; }
+        if (!database?.createAdminUser) { send(503, { error: "Cần kết nối database để tạo tài khoản." }); return true; }
+        const body = await readBody(request);
+        const username = typeof body?.username === "string" ? body.username.trim().toLowerCase() : "";
+        if (!/^[a-z0-9._-]{3,40}$/.test(username) || typeof body?.password !== "string" ||
+            body.password.length < 12 || body.password.length > 200) {
+          send(400, { error: "Username cần 3–40 ký tự (a-z, 0-9, ._-); mật khẩu cần ít nhất 12 ký tự." });
+          return true;
+        }
+        const created = await database.createAdminUser(username, await hashAdminPassword(body.password), user.username);
+        send(201, { user: created });
         return true;
       }
       if (pathname === "/api/v1/admin/popup-image" && request.method === "POST") {
@@ -216,6 +316,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         return true;
       }
       if (pathname === "/api/v1/admin/member-image" && request.method === "POST") {
+        if (user.role !== "super") { send(403, { error: "Admin nhỏ không được sửa thành viên." }); return true; }
         const image = await uploadImage(await readBody(request, maxUploadBodyBytes), "member");
         if (!image) {
           send(400, { error: "Không xử lý được ảnh. Chọn ảnh JPG, PNG, WebP hoặc HEIC dưới 20 MB và thử lại." });
@@ -225,17 +326,46 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         return true;
       }
       if (pathname === "/api/v1/admin/data" && request.method === "GET") {
-        const [members, posts, popup] = await Promise.all([getFile("members"), getFile("posts"), getFile("popup")]);
-        send(200, { members, posts, popup, username: env.ADMIN_USERNAME });
+        const [members, posts, popup] = await Promise.all([user.role === "super" ? getFile("members") : null, getFile("posts"), getFile("popup")]);
+        send(200, { members, posts, popup, username: user.username, role: user.role, accountType: user.source });
         return true;
       }
       if (pathname === "/api/v1/admin/login-logs" && request.method === "GET") {
+        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được xem nhật ký." }); return true; }
         const logs = await getFile("logs");
         send(200, { logs: logs.data.toReversed() });
         return true;
       }
+      if (pathname === "/api/v1/admin/posts" && request.method === "POST") {
+        const body = await readBody(request);
+        if (!validPost(body?.post)) { send(400, { error: "Bài đăng không hợp lệ." }); return true; }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const current = await getFile("posts");
+          if (current.data.some((post) => post.id === body.post.id)) {
+            send(409, { error: "Bài đăng này đã tồn tại." }); return true;
+          }
+          try {
+            const sha = await saveFile("posts", [body.post, ...current.data], current.sha, "Publish Faerie News");
+            send(201, { sha, post: body.post }); return true;
+          } catch (error) { if (error.status !== 409 || attempt === 2) throw error; }
+        }
+      }
+      const postToDelete = /^\/api\/v1\/admin\/posts\/([a-zA-Z0-9_-]{1,120})$/.exec(pathname);
+      if (postToDelete && request.method === "DELETE") {
+        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được xóa bài đăng." }); return true; }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const current = await getFile("posts");
+          const remaining = current.data.filter((post) => post.id !== postToDelete[1]);
+          if (remaining.length === current.data.length) { send(404, { error: "Không tìm thấy bài đăng trong database." }); return true; }
+          try {
+            const sha = await saveFile("posts", remaining, current.sha, "Delete Faerie News post");
+            send(200, { sha }); return true;
+          } catch (error) { if (error.status !== 409 || attempt === 2) throw error; }
+        }
+      }
       const kind = pathname === "/api/v1/admin/members" ? "members" : pathname === "/api/v1/admin/posts" ? "posts" : pathname === "/api/v1/admin/popup" ? "popup" : null;
       if (kind && request.method === "PUT") {
+        if (user.role !== "super" && kind !== "popup") { send(403, { error: "Admin nhỏ chỉ được đăng bài và chỉnh popup sự kiện." }); return true; }
         const body = await readBody(request);
         const validData = kind === "popup" ? validPopup(body?.data) : Array.isArray(body?.data) && body.data.every((item) => item && typeof item === "object" && !Array.isArray(item));
         if (!body || !validData ||

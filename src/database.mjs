@@ -9,6 +9,39 @@ export function createDatabase(connectionString) {
   const pool = new Pool({ connectionString, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 10_000 });
 
   return {
+    async getAdminUser(username) {
+      const result = await pool.query(
+        "SELECT username, password_hash, role, session_version, disabled FROM faerie_admin_users WHERE username = $1",
+        [username],
+      );
+      return result.rows[0] ?? null;
+    },
+    async listAdminUsers() {
+      const result = await pool.query(
+        "SELECT username, role, created_by, created_at, disabled FROM faerie_admin_users ORDER BY created_at, username",
+      );
+      return result.rows;
+    },
+    async createAdminUser(username, passwordHash, createdBy) {
+      try {
+        const result = await pool.query(
+          "INSERT INTO faerie_admin_users (username, password_hash, role, created_by) VALUES ($1, $2, 'editor', $3) RETURNING username, role, created_by, created_at, disabled",
+          [username, passwordHash, createdBy],
+        );
+        return result.rows[0];
+      } catch (error) {
+        if (error.code === "23505") throw Object.assign(new Error("Username này đã được sử dụng."), { status: 409 });
+        throw error;
+      }
+    },
+    async changeAdminPassword(username, passwordHash, sessionVersion) {
+      const result = await pool.query(
+        "UPDATE faerie_admin_users SET password_hash = $1, session_version = session_version + 1, updated_at = now() WHERE username = $2 AND session_version = $3 AND disabled = false RETURNING username, role, session_version",
+        [passwordHash, username, sessionVersion],
+      );
+      if (!result.rowCount) throw Object.assign(new Error("Tài khoản vừa thay đổi. Hãy đăng nhập lại."), { status: 409 });
+      return result.rows[0];
+    },
     async getFile(kind) {
       if (!kinds.has(kind)) throw new Error("Unknown data kind");
       const result = await pool.query("SELECT data, revision FROM faerie_documents WHERE kind = $1", [kind]);
