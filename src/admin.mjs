@@ -67,9 +67,9 @@ function readBody(request, limit = maxBodyBytes) {
   });
 }
 
-export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () => Date.now() } = {}) {
+export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () => Date.now(), database = null } = {}) {
   const attempts = new Map();
-  const ready = () => Boolean(env.ADMIN_USERNAME && env.ADMIN_PASSWORD && env.ADMIN_SESSION_SECRET && env.GITHUB_TOKEN);
+  const ready = () => Boolean(env.ADMIN_USERNAME && env.ADMIN_PASSWORD && env.ADMIN_SESSION_SECRET && (database || env.GITHUB_TOKEN));
   const githubHeaders = () => ({
     Accept: "application/vnd.github+json",
     Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -79,6 +79,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
   const fileUrl = (kind) => `https://api.github.com/repos/${repository}/contents/${files[kind]}`;
 
   async function getFile(kind) {
+    if (database) return database.getFile(kind);
     const response = await fetchImpl(`${fileUrl(kind)}?ref=main`, { headers: githubHeaders(), cache: "no-store" });
     if (!response.ok) throw Object.assign(new Error(`Không đọc được ${files[kind]} từ GitHub (${response.status}).`), { status: 502 });
     const file = await response.json();
@@ -88,6 +89,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
   }
 
   async function saveFile(kind, data, sha, message) {
+    if (database) return database.saveFile(kind, data, sha);
     const response = await fetchImpl(fileUrl(kind), {
       method: "PUT",
       headers: { ...githubHeaders(), "Content-Type": "application/json" },
@@ -99,7 +101,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
     return result.content.sha;
   }
 
-  async function uploadPopupImage(body) {
+  async function uploadImage(body, kind) {
     if (!body || typeof body.mimeType !== "string" || typeof body.imageBase64 !== "string") return null;
     if (!["image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"].includes(body.mimeType) ||
         body.imageBase64.length > Math.ceil(maxSourceImageBytes * 4 / 3) + 4 ||
@@ -122,6 +124,11 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
     }
     if (output.length > maxSavedImageBytes) return null;
     const filename = `${randomUUID()}.webp`;
+    if (database) {
+      await database.saveImage(kind, filename, output);
+      return { image: `https://faerienews-backend.onrender.com/api/v1/${kind}-images/${filename}` };
+    }
+    if (kind !== "popup") throw Object.assign(new Error("Cần cấu hình database trước khi tải ảnh thành viên."), { status: 503 });
     const path = `data/popup-images/${filename}`;
     const response = await fetchImpl(`https://api.github.com/repos/${repository}/contents/${path}`, {
       method: "PUT",
@@ -200,7 +207,16 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         return true;
       }
       if (pathname === "/api/v1/admin/popup-image" && request.method === "POST") {
-        const image = await uploadPopupImage(await readBody(request, maxUploadBodyBytes));
+        const image = await uploadImage(await readBody(request, maxUploadBodyBytes), "popup");
+        if (!image) {
+          send(400, { error: "Không xử lý được ảnh. Chọn ảnh JPG, PNG, WebP hoặc HEIC dưới 20 MB và thử lại." });
+          return true;
+        }
+        send(201, image);
+        return true;
+      }
+      if (pathname === "/api/v1/admin/member-image" && request.method === "POST") {
+        const image = await uploadImage(await readBody(request, maxUploadBodyBytes), "member");
         if (!image) {
           send(400, { error: "Không xử lý được ảnh. Chọn ảnh JPG, PNG, WebP hoặc HEIC dưới 20 MB và thử lại." });
           return true;

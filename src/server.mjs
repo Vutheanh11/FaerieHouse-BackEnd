@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { events2026, members2026, popupConfig, posts } from "./data.mjs";
 import { createAdminApi } from "./admin.mjs";
+import { createDatabase } from "./database.mjs";
 
 const defaultOrigins = "https://faeriehouse.onrender.com,https://faeriehouse-admin.onrender.com,https://vutheanh11.github.io";
 const allowedOrigins = new Set(
@@ -29,8 +30,10 @@ function sendJson(response, status, body, method = "GET", privateResponse = fals
   response.end(method === "HEAD" ? undefined : payload);
 }
 
-export function createApiServer({ adminOptions, imageFetch = fetch, imageToken = process.env.GITHUB_TOKEN, newsPosts = posts } = {}) {
-  const handleAdmin = createAdminApi(adminOptions);
+export function createApiServer({ adminOptions, database, imageFetch = fetch, imageToken = process.env.GITHUB_TOKEN, newsPosts = posts } = {}) {
+  const env = adminOptions?.env ?? process.env;
+  const store = database ?? (env.DATABASE_URL ? createDatabase(env.DATABASE_URL) : null);
+  const handleAdmin = createAdminApi({ ...adminOptions, database: store });
   return createHttpServer(async (request, response) => {
     const origin = request.headers.origin;
     response.setHeader("Vary", "Origin");
@@ -70,8 +73,9 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
       return;
     }
 
+    try {
     if (pathname === "/api/health") {
-      sendJson(response, 200, { status: "ok", service: "faerienews-backend", popupImageUpload: "server-processed" }, request.method);
+      sendJson(response, 200, { status: "ok", service: "faerienews-backend", storage: store ? "postgres" : "github", popupImageUpload: "server-processed" }, request.method);
       return;
     }
     if (pathname === "/") {
@@ -87,8 +91,9 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
         sendJson(response, 400, { error: "Only year 2026 is available for members" }, request.method);
         return;
       }
-      const members = members2026.map((person) => ({ ...person, cohort: person.cohort || "2026", photo: publicAsset(person.photo) }));
-      sendJson(response, 200, { year: 2026, total: members.length, members }, request.method);
+      const source = store ? (await store.getFile("members")).data : members2026;
+      const members = source.map((person) => ({ ...person, cohort: person.cohort || "2026", photo: publicAsset(person.photo) }));
+      sendJson(response, 200, { year: 2026, total: members.length, members }, request.method, Boolean(store));
       return;
     }
     if (pathname === "/api/v1/events" || pathname === "/api/v1/news") {
@@ -97,7 +102,8 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
         sendJson(response, 400, { error: "Year must contain four digits" }, request.method);
         return;
       }
-      const allItems = pathname.endsWith("/events") ? events2026 : [...newsPosts, ...events2026];
+      const currentPosts = store ? (await store.getFile("posts")).data : newsPosts;
+      const allItems = pathname.endsWith("/events") ? events2026 : [...currentPosts, ...events2026];
       const availableYears = [...new Set(allItems.map((item) => String(item.year)))].sort((first, second) => Number(second) - Number(first));
       const dateValue = (item) => Number(`${item.year}${item.date.slice(3, 5)}${item.date.slice(0, 2)}`);
       const items = allItems
@@ -105,21 +111,26 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
         .sort((first, second) => pathname.endsWith("/events") ? dateValue(first) - dateValue(second) : dateValue(second) - dateValue(first))
         .map((item) => ({ ...item, images: (item.images ?? []).map(publicAsset) }));
       const key = pathname.endsWith("/events") ? "events" : "news";
-      sendJson(response, 200, { year: selectedYear ? Number(selectedYear) : null, availableYears, total: items.length, [key]: items }, request.method);
+      sendJson(response, 200, { year: selectedYear ? Number(selectedYear) : null, availableYears, total: items.length, [key]: items }, request.method, Boolean(store && key === "news"));
       return;
     }
     if (pathname === "/api/v1/popup") {
-      sendJson(response, 200, { popup: { ...popupConfig, image: popupConfig.image ? publicAsset(popupConfig.image) : "" } }, request.method);
+      const currentPopup = store ? (await store.getFile("popup")).data : popupConfig;
+      sendJson(response, 200, { popup: { ...currentPopup, image: currentPopup.image ? publicAsset(currentPopup.image) : "" } }, request.method, Boolean(store));
       return;
     }
-    const popupImage = /^\/api\/v1\/popup-images\/([a-f0-9-]{36})\.(webp|png|jpg)$/.exec(pathname);
-    if (popupImage) {
+    const storedImage = /^\/api\/v1\/(popup|member)-images\/([a-f0-9-]{36})\.(webp|png|jpg)$/.exec(pathname);
+    if (storedImage) {
       try {
-        const filename = `${popupImage[1]}.${popupImage[2]}`;
+        const filename = `${storedImage[2]}.${storedImage[3]}`;
         let bytes;
-        try {
-          bytes = await readFile(new URL(`../data/popup-images/${filename}`, import.meta.url));
-        } catch (error) {
+        const saved = store ? await store.getImage(filename) : null;
+        if (saved) {
+          bytes = saved.body;
+        } else if (storedImage[1] === "popup") {
+          try {
+            bytes = await readFile(new URL(`../data/popup-images/${filename}`, import.meta.url));
+          } catch (error) {
           if (error.code !== "ENOENT" || !imageToken) throw error;
           const upstream = await imageFetch(`https://api.github.com/repos/Vutheanh11/FaerieHouse-BackEnd/contents/data/popup-images/${filename}?ref=main`, {
             headers: {
@@ -133,9 +144,12 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
           if (!upstream.ok) throw Object.assign(new Error(`GitHub image unavailable (${upstream.status})`), { code: upstream.status === 404 ? "ENOENT" : "UPSTREAM" });
           bytes = Buffer.from(await upstream.arrayBuffer());
           if (!bytes.length || bytes.length > 3_000_000) throw Object.assign(new Error("GitHub image size is invalid"), { code: "UPSTREAM" });
+          }
+        } else {
+          throw Object.assign(new Error("Image not found"), { code: "ENOENT" });
         }
-        const mime = { webp: "image/webp", png: "image/png", jpg: "image/jpeg" }[popupImage[2]];
-        if (popupImage[2] === "webp" && (bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WEBP")) {
+        const mime = { webp: "image/webp", png: "image/png", jpg: "image/jpeg" }[storedImage[3]];
+        if (storedImage[3] === "webp" && (bytes.toString("ascii", 0, 4) !== "RIFF" || bytes.toString("ascii", 8, 12) !== "WEBP")) {
           throw Object.assign(new Error("GitHub image format is invalid"), { code: "UPSTREAM" });
         }
         response.writeHead(200, {
@@ -153,6 +167,10 @@ export function createApiServer({ adminOptions, imageFetch = fetch, imageToken =
     }
 
     sendJson(response, 404, { error: "Not found" }, request.method);
+    } catch (error) {
+      console.error("Public API error:", error);
+      sendJson(response, error.status ?? 503, { error: "Dữ liệu tạm thời không sẵn sàng." }, request.method);
+    }
   });
 }
 
