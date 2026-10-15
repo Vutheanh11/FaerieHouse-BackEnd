@@ -16,7 +16,14 @@ const allowedOrigins = new Set(
 const frontendSiteUrl = new URL(process.env.FRONTEND_SITE_URL ?? "https://faeriehouse.onrender.com/");
 
 function publicAsset(path) {
-  return new URL(path, frontendSiteUrl).href;
+  return path ? new URL(path, frontendSiteUrl).href : "";
+}
+
+const campuses = new Set(["hcm", "quy-nhon"]);
+function campusOf(item) { return item?.campus === "quy-nhon" ? "quy-nhon" : "hcm"; }
+function popupForCampus(document, campus) {
+  if (document && typeof document === "object" && document.hcm) return document[campus] ?? { enabled: false, title: "", description: "", image: "", facebookUrl: "" };
+  return campus === "hcm" ? document : { enabled: false, title: "", description: "", image: "", facebookUrl: "" };
 }
 
 function sendJson(response, status, body, method = "GET", privateResponse = false) {
@@ -42,7 +49,7 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
       return;
     }
     if (origin) response.setHeader("Access-Control-Allow-Origin", origin);
-    response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, DELETE, OPTIONS");
+    response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS");
     response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
     if (request.method === "OPTIONS") {
@@ -58,6 +65,11 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
       return;
     }
     const { pathname, searchParams } = url;
+    const campus = searchParams.get("campus") ?? "hcm";
+    if (pathname.startsWith("/api/v1/") && !campuses.has(campus)) {
+      sendJson(response, 400, { error: "Unknown campus" }, request.method);
+      return;
+    }
 
     if (pathname.startsWith("/api/v1/admin/")) {
       if (origin !== "https://faeriehouse-admin.onrender.com" && origin !== "http://localhost:8000" && origin !== "http://127.0.0.1:8000") {
@@ -82,7 +94,7 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
       sendJson(response, 200, {
         service: "Faerie News API",
         version: "v1",
-        endpoints: ["/api/health", "/api/v1/members?year=2026", "/api/v1/events?year=2026", "/api/v1/news?year=2026", "/api/v1/popup"],
+        endpoints: ["/api/health", "/api/v1/members?year=2026&campus=hcm", "/api/v1/events?year=2026&campus=hcm", "/api/v1/news?year=2026&campus=hcm", "/api/v1/popup?campus=hcm"],
       }, request.method);
       return;
     }
@@ -92,8 +104,8 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
         return;
       }
       const source = store ? (await store.getFile("members")).data : members2026;
-      const members = source.map((person) => ({ ...person, cohort: person.cohort || "2026", photo: publicAsset(person.photo) }));
-      sendJson(response, 200, { year: 2026, total: members.length, members }, request.method, Boolean(store));
+      const members = source.filter((person) => campusOf(person) === campus).map((person) => ({ ...person, campus, cohort: person.cohort || "2026", photo: publicAsset(person.photo) }));
+      sendJson(response, 200, { year: 2026, campus, total: members.length, members }, request.method, Boolean(store));
       return;
     }
     if (pathname === "/api/v1/events" || pathname === "/api/v1/news") {
@@ -103,7 +115,9 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
         return;
       }
       const currentPosts = store ? (await store.getFile("posts")).data : newsPosts;
-      const allItems = pathname.endsWith("/events") ? events2026 : [...currentPosts, ...events2026];
+      const localEvents = campus === "hcm" ? events2026 : [];
+      const publicPosts = currentPosts.filter((item) => campusOf(item) === campus && (item.status ?? "published") === "published");
+      const allItems = pathname.endsWith("/events") ? localEvents : [...publicPosts, ...localEvents];
       const availableYears = [...new Set(allItems.map((item) => String(item.year)))].sort((first, second) => Number(second) - Number(first));
       const dateValue = (item) => Number(`${item.year}${item.date.slice(3, 5)}${item.date.slice(0, 2)}`);
       const items = allItems
@@ -111,15 +125,16 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
         .sort((first, second) => pathname.endsWith("/events") ? dateValue(first) - dateValue(second) : dateValue(second) - dateValue(first))
         .map((item) => ({ ...item, images: (item.images ?? []).map(publicAsset) }));
       const key = pathname.endsWith("/events") ? "events" : "news";
-      sendJson(response, 200, { year: selectedYear ? Number(selectedYear) : null, availableYears, total: items.length, [key]: items }, request.method, Boolean(store && key === "news"));
+      sendJson(response, 200, { year: selectedYear ? Number(selectedYear) : null, campus, availableYears, total: items.length, [key]: items }, request.method, Boolean(store && key === "news"));
       return;
     }
     if (pathname === "/api/v1/popup") {
-      const currentPopup = store ? (await store.getFile("popup")).data : popupConfig;
-      sendJson(response, 200, { popup: { ...currentPopup, image: currentPopup.image ? publicAsset(currentPopup.image) : "" } }, request.method, Boolean(store));
+      const document = store ? (await store.getFile("popup")).data : popupConfig;
+      const currentPopup = popupForCampus(document, campus);
+      sendJson(response, 200, { campus, popup: { ...currentPopup, image: publicAsset(currentPopup.image) } }, request.method, Boolean(store));
       return;
     }
-    const storedImage = /^\/api\/v1\/(popup|member)-images\/([a-f0-9-]{36})\.(webp|png|jpg)$/.exec(pathname);
+    const storedImage = /^\/api\/v1\/(popup|member|news)-images\/([a-f0-9-]{36})\.(webp|png|jpg)$/.exec(pathname);
     if (storedImage) {
       try {
         const filename = `${storedImage[2]}.${storedImage[3]}`;

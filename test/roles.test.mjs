@@ -38,7 +38,7 @@ test("database admin roles allow publishing but reserve account creation and pos
       return user;
     },
   };
-  const server = createApiServer({ database, adminOptions: { env: { ADMIN_SESSION_SECRET: "test-secret" } } });
+  const server = createApiServer({ database, adminOptions: { env: { ADMIN_SESSION_SECRET: "test-secret", ADMIN_USERNAME: "legacy", ADMIN_PASSWORD: "legacy-password" } } });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -48,6 +48,7 @@ test("database admin roles allow publishing but reserve account creation and pos
     ...(body ? { body: JSON.stringify(body) } : {}),
   });
   try {
+    assert.equal((await request("login", "POST", "", { username: "legacy", password: "legacy-password" })).status, 401);
     const login = await request("login", "POST", "", { username: "1", password: "1" });
     assert.equal(login.status, 200);
     const superSession = await login.json();
@@ -76,7 +77,10 @@ test("database admin roles allow publishing but reserve account creation and pos
     assert.equal((await request("posts", "PUT", editorSession.token, { data: [], sha: revisions.posts })).status, 403);
     assert.equal((await request("popup", "PUT", editorSession.token, { data: documents.popup, sha: revisions.popup })).status, 200);
     assert.equal((await request(`posts/${post.id}`, "DELETE", superSession.token)).status, 200);
-    assert.equal(documents.posts.length, 0);
+    assert.equal(documents.posts.length, 1);
+    assert.equal(documents.posts[0].status, "trash");
+    assert.equal((await request(`posts/${post.id}/restore`, "POST", superSession.token)).status, 200);
+    assert.equal(documents.posts[0].status, "draft");
 
     const changed = await request("change-password", "POST", superSession.token, { currentPassword: "1", newPassword: "a-much-stronger-password" });
     assert.equal(changed.status, 200);

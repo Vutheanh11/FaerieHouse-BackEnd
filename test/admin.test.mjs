@@ -5,7 +5,7 @@ import sharp from "sharp";
 import { createApiServer } from "../src/server.mjs";
 
 const origin = "https://faeriehouse-admin.onrender.com";
-const env = { ADMIN_USERNAME: "faerie", ADMIN_PASSWORD: "a-long-test-password", ADMIN_SESSION_SECRET: "test-session-secret-with-adequate-length", GITHUB_TOKEN: "test-github-token" };
+const env = { ADMIN_USERNAME: "faerie", ADMIN_PASSWORD: "a-long-test-password", ADMIN_SESSION_SECRET: "test-session-secret-with-adequate-length", GITHUB_TOKEN: "test-github-token", ALLOW_LEGACY_ADMIN: "true" };
 const files = new Map([
   ["members.json", { sha: "a".repeat(40), data: [{ name: "A", title: "Member" }] }],
   ["posts.json", { sha: "b".repeat(40), data: [] }],
@@ -55,7 +55,8 @@ test("admin routes require the correct origin and a valid session", async () => 
   assert.equal((await call("login-logs")).status, 401);
   assert.equal((await call("login", { method: "POST", body: { username: "faerie", password: "wrong" } })).status, 401);
   assert.equal((await call("login", { method: "POST", body: { username: "faerie", password: env.ADMIN_PASSWORD }, originHeader: "https://evil.example" })).status, 403);
-  assert.equal(files.get("admin-login-log.json").data.length, 0);
+  assert.equal(files.get("admin-login-log.json").data.length, 1);
+  assert.equal(files.get("admin-login-log.json").data[0].status, "failure");
 });
 
 test("login records IP and device, then allows reading and saving data", async () => {
@@ -64,8 +65,9 @@ test("login records IP and device, then allows reading and saving data", async (
   const { token } = await login.json();
   assert.ok(token);
   const logs = await (await call("login-logs", { token })).json();
-  assert.equal(logs.logs.length, 1);
+  assert.equal(logs.logs.length, 2);
   assert.equal(logs.logs[0].username, "faerie");
+  assert.equal(logs.logs[0].status, "success");
   assert.ok(logs.logs[0].ip);
   assert.ok(logs.logs[0].device);
   const data = await (await call("data", { token })).json();

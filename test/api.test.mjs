@@ -119,3 +119,15 @@ test("CORS allows the frontend and rejects unrelated origins", async () => {
   assert.equal((await fetch(`${baseUrl}/api/v1/members?year=2025`)).status, 400);
   assert.equal((await fetch(`${baseUrl}/api/v1/members`, { method: "POST" })).status, 405);
 });
+
+test("Quy Nhơn starts empty and does not receive TP.HCM members, events or popup", async () => {
+  const members = await (await fetch(`${baseUrl}/api/v1/members?campus=quy-nhon`)).json();
+  const news = await (await fetch(`${baseUrl}/api/v1/news?campus=quy-nhon`)).json();
+  const events = await (await fetch(`${baseUrl}/api/v1/events?campus=quy-nhon`)).json();
+  const popup = await (await fetch(`${baseUrl}/api/v1/popup?campus=quy-nhon`)).json();
+  assert.equal(members.total, 0);
+  assert.equal(news.total, 0);
+  assert.equal(events.total, 0);
+  assert.equal(popup.popup.enabled, false);
+  assert.equal((await fetch(`${baseUrl}/api/v1/news?campus=unknown`)).status, 400);
+});

@@ -2,6 +2,7 @@ import { createHmac, randomBytes, randomUUID, scrypt, timingSafeEqual } from "no
 import { isIP } from "node:net";
 import { promisify } from "node:util";
 import sharp from "sharp";
+import { newTotpSecret, openTotpSecret, readSetupToken, sealTotpSecret, signSetupToken, verifyTotp } from "./mfa.mjs";
 
 const repository = "Vutheanh11/FaerieHouse-BackEnd";
 const files = { members: "data/members.json", posts: "data/posts.json", logs: "data/admin-login-log.json", popup: "data/popup.json" };
@@ -44,8 +45,20 @@ function validPopup(data) {
   return true;
 }
 
+function validPopupDocument(data) {
+  return validPopup(data) || (data && validPopup(data.hcm) && validPopup(data["quy-nhon"]));
+}
+function postCampus(post) { return post?.campus === "quy-nhon" ? "quy-nhon" : "hcm"; }
+function postStatus(post) { return post?.status ?? "published"; }
+function postSnapshot(post, username, time) {
+  const { history, ...content } = post;
+  return { ...content, savedBy: username, savedAt: time };
+}
+
 function validPost(post) {
   if (!post || typeof post !== "object" || Array.isArray(post) ||
+      (post.campus !== undefined && !["hcm", "quy-nhon"].includes(post.campus)) ||
+      !["draft", "published", "trash"].includes(postStatus(post)) ||
       typeof post.id !== "string" || !/^[a-f0-9-]{36}$/.test(post.id) ||
       typeof post.date !== "string" || !/^\d{2}\.\d{2}$/.test(post.date) ||
       typeof post.year !== "string" || !/^\d{4}$/.test(post.year) ||
@@ -55,7 +68,8 @@ function validPost(post) {
       typeof post.location !== "string" || post.location.length > 100 ||
       !Array.isArray(post.images) || post.images.length > 4 ||
       !post.images.every((image) => typeof image === "string" && image.length <= 600 && /^https:\/\//.test(image)) ||
-      !Array.isArray(post.bodyBlocks) || !post.bodyBlocks.length) return false;
+      !Array.isArray(post.bodyBlocks) || post.bodyBlocks.length > 200 ||
+      (postStatus(post) === "published" && !post.bodyBlocks.length)) return false;
   let textLength = 0;
   for (const block of post.bodyBlocks) {
     if (!block || !Array.isArray(block.runs) || block.runs.length > 200) return false;
@@ -64,7 +78,7 @@ function validPost(post) {
       textLength += run.text.length;
     }
   }
-  return textLength > 0 && textLength <= 10_000;
+  return (postStatus(post) !== "published" || textLength > 0) && textLength <= 10_000;
 }
 
 function constantTimeEqual(first, second) {
@@ -109,7 +123,8 @@ function readBody(request, limit = maxBodyBytes) {
 
 export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () => Date.now(), database = null } = {}) {
   const attempts = new Map();
-  const ready = () => Boolean(env.ADMIN_SESSION_SECRET && (database?.getAdminUser || (env.ADMIN_USERNAME && env.ADMIN_PASSWORD)) && (database || env.GITHUB_TOKEN));
+  const legacyEnabled = () => env.ALLOW_LEGACY_ADMIN === "true";
+  const ready = () => Boolean(env.ADMIN_SESSION_SECRET && (database?.getAdminUser || (legacyEnabled() && env.ADMIN_USERNAME && env.ADMIN_PASSWORD)) && (database || env.GITHUB_TOKEN));
   const githubHeaders = () => ({
     Accept: "application/vnd.github+json",
     Authorization: `Bearer ${env.GITHUB_TOKEN}`,
@@ -124,7 +139,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
     if (!response.ok) throw Object.assign(new Error(`Không đọc được ${files[kind]} từ GitHub (${response.status}).`), { status: 502 });
     const file = await response.json();
     const data = JSON.parse(Buffer.from(file.content.replace(/\s/g, ""), "base64").toString("utf8"));
-    if (kind === "popup" ? !validPopup(data) : !Array.isArray(data)) throw Object.assign(new Error("Dữ liệu repo không hợp lệ."), { status: 502 });
+    if (kind === "popup" ? !validPopupDocument(data) : !Array.isArray(data)) throw Object.assign(new Error("Dữ liệu repo không hợp lệ."), { status: 502 });
     return { data, sha: file.sha };
   }
 
@@ -198,27 +213,28 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       if (payload.s === "database" && database?.getAdminUser) {
         const user = await database.getAdminUser(payload.u);
         return user && !user.disabled && user.role === payload.r && user.session_version === payload.v
-          ? { username: user.username, role: user.role, source: "database", sessionVersion: user.session_version, passwordHash: user.password_hash }
+          ? { username: user.username, role: user.role, source: "database", sessionVersion: user.session_version, passwordHash: user.password_hash, mfaSecret: user.mfa_secret }
           : null;
       }
-      if (payload.s === "legacy" && payload.u === env.ADMIN_USERNAME && payload.r === "super") {
+      if (legacyEnabled() && payload.s === "legacy" && payload.u === env.ADMIN_USERNAME && payload.r === "super") {
         return { username: env.ADMIN_USERNAME, role: "super", source: "legacy" };
       }
       return null;
     } catch { return null; }
   }
 
-  async function appendLoginLog(request, username) {
+  async function appendLoginLog(request, username, status = "success") {
     const entry = {
       time: new Date(now()).toISOString(),
       username,
       ip: clientIp(request),
       device: deviceLabel(request.headers["user-agent"]),
+      status,
     };
     for (let attempt = 0; attempt < 3; attempt++) {
       const { data, sha } = await getFile("logs");
       try {
-        await saveFile("logs", [...data, entry].slice(-200), sha, "Record Faerie Admin login");
+        await saveFile("logs", [...data, entry].slice(-200), sha, "Record Faerie Admin login attempt");
         return;
       } catch (error) {
         if (error.status !== 409 || attempt === 2) throw error;
@@ -245,8 +261,14 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         if (body && typeof body.username === "string" && typeof body.password === "string" && body.password.length <= 200) {
           const stored = database?.getAdminUser ? await database.getAdminUser(body.username) : null;
           if (stored && !stored.disabled && await verifyAdminPassword(body.password, stored.password_hash)) {
-            user = { username: stored.username, role: stored.role, source: "database", sessionVersion: stored.session_version };
-          } else if (!stored && env.ADMIN_USERNAME && env.ADMIN_PASSWORD &&
+            if (stored.role === "super" && stored.mfa_secret && !body.code) {
+              send(202, { requiresMfa: true, message: "Nhập mã 6 số từ ứng dụng xác thực." });
+              return true;
+            }
+            if (!stored.mfa_secret || verifyTotp(openTotpSecret(stored.mfa_secret, env.ADMIN_SESSION_SECRET), body.code, now())) {
+              user = { username: stored.username, role: stored.role, source: "database", sessionVersion: stored.session_version };
+            }
+          } else if (!stored && legacyEnabled() && env.ADMIN_USERNAME && env.ADMIN_PASSWORD &&
                      constantTimeEqual(body.username, env.ADMIN_USERNAME) && constantTimeEqual(body.password, env.ADMIN_PASSWORD)) {
             user = { username: env.ADMIN_USERNAME, role: "super", source: "legacy" };
           }
@@ -254,6 +276,8 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         if (!user) {
           const count = record.until > now() - 15 * 60 * 1000 ? record.count + 1 : 1;
           attempts.set(ip, { count, until: count >= 5 ? now() + 15 * 60 * 1000 : now() });
+          try { await appendLoginLog(request, String(body?.username ?? "").slice(0, 40), "failure"); }
+          catch (error) { console.error("Login audit error:", error); }
           send(401, { error: "Username hoặc Password không đúng." });
           return true;
         }
@@ -284,6 +308,44 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         }
         const updated = await database.changeAdminPassword(user.username, await hashAdminPassword(body.newPassword), user.sessionVersion);
         send(200, signSession({ username: updated.username, role: updated.role, source: "database", sessionVersion: updated.session_version }));
+        return true;
+      }
+      if (pathname === "/api/v1/admin/mfa/setup" && request.method === "POST") {
+        if (user.role !== "super" || user.source !== "database" || !database?.setAdminMfaSecret) { send(403, { error: "Chỉ admin lớn trong database được bật xác thực hai bước." }); return true; }
+        if (database.isMfaReady && !await database.isMfaReady()) { send(503, { error: "Xác thực hai bước chưa sẵn sàng trên database. Vui lòng liên hệ quản trị viên." }); return true; }
+        if (user.mfaSecret) { send(409, { error: "Xác thực hai bước đã được bật." }); return true; }
+        const body = await readBody(request);
+        if (!await verifyAdminPassword(body?.password ?? "", user.passwordHash)) { send(401, { error: "Mật khẩu hiện tại không đúng." }); return true; }
+        const secret = newTotpSecret();
+        const setupToken = signSetupToken({ u: user.username, v: user.sessionVersion, secret, exp: now() + 10 * 60_000 }, env.ADMIN_SESSION_SECRET);
+        const issuer = encodeURIComponent("Faerie House Admin");
+        const label = encodeURIComponent(`Faerie House Admin:${user.username}`);
+        send(200, { secret, setupToken, otpAuthUrl: `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30` });
+        return true;
+      }
+      if (pathname === "/api/v1/admin/mfa/enable" && request.method === "POST") {
+        if (user.role !== "super" || user.source !== "database" || !database?.setAdminMfaSecret || user.mfaSecret) { send(403, { error: "Không thể bật xác thực hai bước." }); return true; }
+        const body = await readBody(request);
+        const setup = readSetupToken(body?.setupToken, env.ADMIN_SESSION_SECRET);
+        if (!setup || setup.u !== user.username || setup.v !== user.sessionVersion || setup.exp <= now() || !verifyTotp(setup.secret, body?.code, now())) {
+          send(400, { error: "Mã xác thực không đúng hoặc đã hết hạn." }); return true;
+        }
+        const updated = await database.setAdminMfaSecret(user.username, sealTotpSecret(setup.secret, env.ADMIN_SESSION_SECRET), user.sessionVersion);
+        try { await appendLoginLog(request, user.username, "mfa-enabled"); }
+        catch (error) { console.error("MFA audit error:", error); }
+        send(200, { ...signSession({ username: updated.username, role: updated.role, source: "database", sessionVersion: updated.session_version }), mfaEnabled: true });
+        return true;
+      }
+      if (pathname === "/api/v1/admin/mfa/disable" && request.method === "POST") {
+        if (user.role !== "super" || user.source !== "database" || !user.mfaSecret || !database?.setAdminMfaSecret) { send(403, { error: "Xác thực hai bước chưa được bật." }); return true; }
+        const body = await readBody(request);
+        if (!await verifyAdminPassword(body?.password ?? "", user.passwordHash) || !verifyTotp(openTotpSecret(user.mfaSecret, env.ADMIN_SESSION_SECRET), body?.code, now())) {
+          send(401, { error: "Mật khẩu hoặc mã xác thực không đúng." }); return true;
+        }
+        const updated = await database.setAdminMfaSecret(user.username, null, user.sessionVersion);
+        try { await appendLoginLog(request, user.username, "mfa-disabled"); }
+        catch (error) { console.error("MFA audit error:", error); }
+        send(200, { ...signSession({ username: updated.username, role: updated.role, source: "database", sessionVersion: updated.session_version }), mfaEnabled: false });
         return true;
       }
       if (pathname === "/api/v1/admin/users" && request.method === "GET") {
@@ -325,9 +387,15 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         send(201, image);
         return true;
       }
+      if (pathname === "/api/v1/admin/news-image" && request.method === "POST") {
+        const image = await uploadImage(await readBody(request, maxUploadBodyBytes), "news");
+        if (!image) { send(400, { error: "Không xử lý được ảnh. Chọn JPG, PNG, WebP hoặc HEIC dưới 20 MB." }); return true; }
+        send(201, image);
+        return true;
+      }
       if (pathname === "/api/v1/admin/data" && request.method === "GET") {
         const [members, posts, popup] = await Promise.all([user.role === "super" ? getFile("members") : null, getFile("posts"), getFile("popup")]);
-        send(200, { members, posts, popup, username: user.username, role: user.role, accountType: user.source });
+        send(200, { members, posts, popup, username: user.username, role: user.role, accountType: user.source, mfaEnabled: Boolean(user.mfaSecret) });
         return true;
       }
       if (pathname === "/api/v1/admin/login-logs" && request.method === "GET") {
@@ -338,28 +406,62 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       }
       if (pathname === "/api/v1/admin/posts" && request.method === "POST") {
         const body = await readBody(request);
-        if (!validPost(body?.post)) { send(400, { error: "Bài đăng không hợp lệ." }); return true; }
+        if (!validPost(body?.post) || postStatus(body.post) === "trash") { send(400, { error: "Bài đăng không hợp lệ." }); return true; }
+        const post = { ...body.post, campus: postCampus(body.post), status: postStatus(body.post), history: [], createdBy: user.username, updatedAt: new Date(now()).toISOString() };
         for (let attempt = 0; attempt < 3; attempt++) {
           const current = await getFile("posts");
-          if (current.data.some((post) => post.id === body.post.id)) {
+          if (current.data.some((item) => item.id === post.id)) {
             send(409, { error: "Bài đăng này đã tồn tại." }); return true;
           }
           try {
-            const sha = await saveFile("posts", [body.post, ...current.data], current.sha, "Publish Faerie News");
-            send(201, { sha, post: body.post }); return true;
+            const sha = await saveFile("posts", [post, ...current.data], current.sha, "Save Faerie News");
+            send(201, { sha, post }); return true;
           } catch (error) { if (error.status !== 409 || attempt === 2) throw error; }
         }
       }
       const postToDelete = /^\/api\/v1\/admin\/posts\/([a-zA-Z0-9_-]{1,120})$/.exec(pathname);
+      if (postToDelete && request.method === "PATCH") {
+        const body = await readBody(request);
+        if (!validPost(body?.post) || body.post.id !== postToDelete[1] || postStatus(body.post) === "trash") {
+          send(400, { error: "Bài đăng không hợp lệ." }); return true;
+        }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const current = await getFile("posts");
+          const index = current.data.findIndex((item) => item.id === postToDelete[1]);
+          if (index < 0 || postStatus(current.data[index]) === "trash") { send(404, { error: "Không tìm thấy bài cần sửa." }); return true; }
+          const previous = current.data[index];
+          const history = [...(previous.history ?? []), postSnapshot(previous, user.username, new Date(now()).toISOString())].slice(-20);
+          const post = { ...body.post, campus: postCampus(body.post), status: postStatus(body.post), createdBy: previous.createdBy, history, updatedAt: new Date(now()).toISOString() };
+          try {
+            const sha = await saveFile("posts", current.data.with(index, post), current.sha, "Edit Faerie News");
+            send(200, { sha, post }); return true;
+          } catch (error) { if (error.status !== 409 || attempt === 2) throw error; }
+        }
+      }
+      const restorePost = /^\/api\/v1\/admin\/posts\/([a-zA-Z0-9_-]{1,120})\/restore$/.exec(pathname);
+      if (restorePost && request.method === "POST") {
+        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được khôi phục bài." }); return true; }
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const current = await getFile("posts");
+          const index = current.data.findIndex((item) => item.id === restorePost[1] && postStatus(item) === "trash");
+          if (index < 0) { send(404, { error: "Không tìm thấy bài trong thùng rác." }); return true; }
+          const post = { ...current.data[index], status: "draft", updatedAt: new Date(now()).toISOString() };
+          try {
+            const sha = await saveFile("posts", current.data.with(index, post), current.sha, "Restore Faerie News draft");
+            send(200, { sha, post }); return true;
+          } catch (error) { if (error.status !== 409 || attempt === 2) throw error; }
+        }
+      }
       if (postToDelete && request.method === "DELETE") {
         if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được xóa bài đăng." }); return true; }
         for (let attempt = 0; attempt < 3; attempt++) {
           const current = await getFile("posts");
-          const remaining = current.data.filter((post) => post.id !== postToDelete[1]);
-          if (remaining.length === current.data.length) { send(404, { error: "Không tìm thấy bài đăng trong database." }); return true; }
+          const index = current.data.findIndex((post) => post.id === postToDelete[1] && postStatus(post) !== "trash");
+          if (index < 0) { send(404, { error: "Không tìm thấy bài đăng trong database." }); return true; }
+          const post = { ...current.data[index], status: "trash", updatedAt: new Date(now()).toISOString() };
           try {
-            const sha = await saveFile("posts", remaining, current.sha, "Delete Faerie News post");
-            send(200, { sha }); return true;
+            const sha = await saveFile("posts", current.data.with(index, post), current.sha, "Move Faerie News post to trash");
+            send(200, { sha, post }); return true;
           } catch (error) { if (error.status !== 409 || attempt === 2) throw error; }
         }
       }
@@ -367,7 +469,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       if (kind && request.method === "PUT") {
         if (user.role !== "super" && kind !== "popup") { send(403, { error: "Admin nhỏ chỉ được đăng bài và chỉnh popup sự kiện." }); return true; }
         const body = await readBody(request);
-        const validData = kind === "popup" ? validPopup(body?.data) : Array.isArray(body?.data) && body.data.every((item) => item && typeof item === "object" && !Array.isArray(item));
+        const validData = kind === "popup" ? validPopupDocument(body?.data) : Array.isArray(body?.data) && body.data.every((item) => item && typeof item === "object" && !Array.isArray(item));
         if (!body || !validData ||
             typeof body.sha !== "string" || !/^[a-f0-9]{40}$/.test(body.sha)) {
           send(400, { error: "Dữ liệu lưu không hợp lệ." });

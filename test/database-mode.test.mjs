@@ -24,7 +24,7 @@ test("PostgreSQL mode serves live data and stores member images without GitHub",
     async saveImage(kind, filename, bytes) { images.set(filename, { kind, body: bytes }); },
     async getImage(filename) { return images.get(filename); },
   };
-  const env = { ADMIN_USERNAME: "admin", ADMIN_PASSWORD: "test-password", ADMIN_SESSION_SECRET: "test-secret" };
+  const env = { ADMIN_USERNAME: "admin", ADMIN_PASSWORD: "test-password", ADMIN_SESSION_SECRET: "test-secret", ALLOW_LEGACY_ADMIN: "true" };
   const server = createApiServer({ database, adminOptions: { env } });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
