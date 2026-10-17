@@ -11,22 +11,22 @@ export function createDatabase(connectionString) {
   return {
     async getAdminUser(username) {
       const result = await pool.query(
-        "SELECT username, password_hash, role, session_version, disabled, to_jsonb(faerie_admin_users)->>'mfa_secret' AS mfa_secret FROM faerie_admin_users WHERE username = $1",
+        "SELECT username, password_hash, role, campus, session_version, disabled, to_jsonb(faerie_admin_users)->>'mfa_secret' AS mfa_secret FROM faerie_admin_users WHERE username = $1",
         [username],
       );
       return result.rows[0] ?? null;
     },
     async listAdminUsers() {
       const result = await pool.query(
-        "SELECT username, role, created_by, created_at, disabled FROM faerie_admin_users ORDER BY created_at, username",
+        "SELECT username, role, campus, created_by, created_at, updated_at, disabled FROM faerie_admin_users ORDER BY created_at, username",
       );
       return result.rows;
     },
-    async createAdminUser(username, passwordHash, createdBy) {
+    async createAdminUser(username, passwordHash, createdBy, role = "editor", campus = null) {
       try {
         const result = await pool.query(
-          "INSERT INTO faerie_admin_users (username, password_hash, role, created_by) VALUES ($1, $2, 'editor', $3) RETURNING username, role, created_by, created_at, disabled",
-          [username, passwordHash, createdBy],
+          "INSERT INTO faerie_admin_users (username, password_hash, role, campus, created_by) VALUES ($1, $2, $3, $4, $5) RETURNING username, role, campus, created_by, created_at, updated_at, disabled",
+          [username, passwordHash, role, campus, createdBy],
         );
         return result.rows[0];
       } catch (error) {
@@ -34,9 +34,17 @@ export function createDatabase(connectionString) {
         throw error;
       }
     },
+    async updateAdminUser(username, { role, campus, disabled, passwordHash }, sessionVersion) {
+      const result = await pool.query(
+        "UPDATE faerie_admin_users SET role = $1, campus = $2, disabled = $3, password_hash = COALESCE($4, password_hash), session_version = session_version + 1, updated_at = now() WHERE username = $5 AND role <> 'super' AND session_version = $6 RETURNING username, role, campus, created_by, created_at, updated_at, disabled",
+        [role, campus, disabled, passwordHash ?? null, username, sessionVersion],
+      );
+      if (!result.rowCount) throw Object.assign(new Error("Tài khoản vừa thay đổi. Hãy tải lại danh sách."), { status: 409 });
+      return result.rows[0];
+    },
     async changeAdminPassword(username, passwordHash, sessionVersion) {
       const result = await pool.query(
-        "UPDATE faerie_admin_users SET password_hash = $1, session_version = session_version + 1, updated_at = now() WHERE username = $2 AND session_version = $3 AND disabled = false RETURNING username, role, session_version",
+        "UPDATE faerie_admin_users SET password_hash = $1, session_version = session_version + 1, updated_at = now() WHERE username = $2 AND session_version = $3 AND disabled = false RETURNING username, role, campus, session_version",
         [passwordHash, username, sessionVersion],
       );
       if (!result.rowCount) throw Object.assign(new Error("Tài khoản vừa thay đổi. Hãy đăng nhập lại."), { status: 409 });

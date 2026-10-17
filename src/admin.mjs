@@ -49,6 +49,16 @@ function validPopupDocument(data) {
   return validPopup(data) || (data && validPopup(data.hcm) && validPopup(data["quy-nhon"]));
 }
 function postCampus(post) { return post?.campus === "quy-nhon" ? "quy-nhon" : "hcm"; }
+function adminCampus(user) { return user.role === "campus_admin" ? user.campus : null; }
+function emptyPopup() { return { enabled: false, title: "", description: "", image: "", facebookUrl: "" }; }
+function popupForCampus(data, campus) {
+  if (data && typeof data === "object" && data.hcm) return data[campus] ?? emptyPopup();
+  return campus === "hcm" ? data : emptyPopup();
+}
+function updateCampusPopup(data, campus, popup) {
+  if (data && typeof data === "object" && data.hcm) return { ...data, [campus]: popup };
+  return campus === "hcm" ? { hcm: popup, "quy-nhon": emptyPopup() } : { hcm: data, "quy-nhon": popup };
+}
 function postStatus(post) { return post?.status ?? "published"; }
 function postSnapshot(post, username, time) {
   const { history, ...content } = post;
@@ -198,7 +208,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
     const expiresAt = now() + sessionLifetimeMs;
     const payload = Buffer.from(JSON.stringify({ u: user.username, r: user.role, s: user.source, v: user.sessionVersion ?? 0, exp: expiresAt, n: randomUUID() })).toString("base64url");
     const signature = createHmac("sha256", env.ADMIN_SESSION_SECRET).update(payload).digest("base64url");
-    return { token: `${payload}.${signature}`, expiresAt, username: user.username, role: user.role, accountType: user.source };
+    return { token: `${payload}.${signature}`, expiresAt, username: user.username, role: user.role, campus: user.campus ?? null, accountType: user.source };
   }
 
   async function authenticated(request) {
@@ -212,8 +222,9 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       if (!Number.isFinite(payload.exp) || payload.exp <= now() || typeof payload.u !== "string") return null;
       if (payload.s === "database" && database?.getAdminUser) {
         const user = await database.getAdminUser(payload.u);
-        return user && !user.disabled && user.role === payload.r && user.session_version === payload.v
-          ? { username: user.username, role: user.role, source: "database", sessionVersion: user.session_version, passwordHash: user.password_hash, mfaSecret: user.mfa_secret }
+        return user && !user.disabled && user.role === payload.r && user.session_version === payload.v &&
+          (user.role !== "campus_admin" || user.campus === "quy-nhon")
+          ? { username: user.username, role: user.role, campus: user.campus ?? null, source: "database", sessionVersion: user.session_version, passwordHash: user.password_hash, mfaSecret: user.mfa_secret }
           : null;
       }
       if (legacyEnabled() && payload.s === "legacy" && payload.u === env.ADMIN_USERNAME && payload.r === "super") {
@@ -266,7 +277,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
               return true;
             }
             if (!stored.mfa_secret || verifyTotp(openTotpSecret(stored.mfa_secret, env.ADMIN_SESSION_SECRET), body.code, now())) {
-              user = { username: stored.username, role: stored.role, source: "database", sessionVersion: stored.session_version };
+              user = { username: stored.username, role: stored.role, campus: stored.campus ?? null, source: "database", sessionVersion: stored.session_version };
             }
           } else if (!stored && legacyEnabled() && env.ADMIN_USERNAME && env.ADMIN_PASSWORD &&
                      constantTimeEqual(body.username, env.ADMIN_USERNAME) && constantTimeEqual(body.password, env.ADMIN_PASSWORD)) {
@@ -307,7 +318,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
           return true;
         }
         const updated = await database.changeAdminPassword(user.username, await hashAdminPassword(body.newPassword), user.sessionVersion);
-        send(200, signSession({ username: updated.username, role: updated.role, source: "database", sessionVersion: updated.session_version }));
+        send(200, signSession({ username: updated.username, role: updated.role, campus: updated.campus, source: "database", sessionVersion: updated.session_version }));
         return true;
       }
       if (pathname === "/api/v1/admin/mfa/setup" && request.method === "POST") {
@@ -359,13 +370,56 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         if (!database?.createAdminUser) { send(503, { error: "Cần kết nối database để tạo tài khoản." }); return true; }
         const body = await readBody(request);
         const username = typeof body?.username === "string" ? body.username.trim().toLowerCase() : "";
+        const role = body?.role ?? "editor";
+        const campus = role === "campus_admin" ? body?.campus : null;
         if (!/^[a-z0-9._-]{3,40}$/.test(username) || typeof body?.password !== "string" ||
-            body.password.length < 12 || body.password.length > 200) {
-          send(400, { error: "Username cần 3–40 ký tự (a-z, 0-9, ._-); mật khẩu cần ít nhất 12 ký tự." });
+            body.password.length < 12 || body.password.length > 200 ||
+            !["editor", "campus_admin"].includes(role) || (role === "campus_admin" && campus !== "quy-nhon")) {
+          send(400, { error: "Username cần 3–40 ký tự, mật khẩu ít nhất 12 ký tự; tài khoản campus_admin phải thuộc campus quy-nhon." });
           return true;
         }
-        const created = await database.createAdminUser(username, await hashAdminPassword(body.password), user.username);
+        const created = await database.createAdminUser(username, await hashAdminPassword(body.password), user.username, role, campus);
         send(201, { user: created });
+        return true;
+      }
+      const adminUserPath = /^\/api\/v1\/admin\/users\/([a-z0-9._-]{3,40})$/.exec(pathname);
+      if (adminUserPath && ["PATCH", "DELETE"].includes(request.method)) {
+        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được sửa hoặc vô hiệu hóa tài khoản." }); return true; }
+        if (!database?.getAdminUser || !database?.updateAdminUser) { send(503, { error: "Cần kết nối database để quản lý tài khoản." }); return true; }
+        const target = await database.getAdminUser(adminUserPath[1]);
+        if (!target || target.role === "super") { send(404, { error: "Không tìm thấy tài khoản có thể quản lý." }); return true; }
+        if (request.method === "DELETE") {
+          const updated = await database.updateAdminUser(target.username, {
+            role: target.role,
+            campus: target.campus ?? null,
+            disabled: true,
+          }, target.session_version);
+          send(200, { user: updated });
+          return true;
+        }
+        const body = await readBody(request);
+        const hasRole = Object.hasOwn(body ?? {}, "role");
+        const hasCampus = Object.hasOwn(body ?? {}, "campus");
+        const hasDisabled = Object.hasOwn(body ?? {}, "disabled");
+        const hasPassword = Object.hasOwn(body ?? {}, "password");
+        if (!hasRole && !hasCampus && !hasDisabled && !hasPassword) {
+          send(400, { error: "Cần cung cấp ít nhất một trường cần cập nhật." }); return true;
+        }
+        const role = hasRole ? body.role : target.role;
+        const campus = role === "campus_admin" ? (hasCampus ? body.campus : target.campus) : null;
+        if (!["editor", "campus_admin"].includes(role) ||
+            (role === "campus_admin" && campus !== "quy-nhon") ||
+            (hasDisabled && typeof body.disabled !== "boolean") ||
+            (hasPassword && (typeof body.password !== "string" || body.password.length < 12 || body.password.length > 200))) {
+          send(400, { error: "Vai trò, campus, trạng thái hoặc mật khẩu không hợp lệ." }); return true;
+        }
+        const updated = await database.updateAdminUser(target.username, {
+          role,
+          campus,
+          disabled: hasDisabled ? body.disabled : target.disabled,
+          ...(hasPassword ? { passwordHash: await hashAdminPassword(body.password) } : {}),
+        }, target.session_version);
+        send(200, { user: updated });
         return true;
       }
       if (pathname === "/api/v1/admin/popup-image" && request.method === "POST") {
@@ -378,7 +432,7 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         return true;
       }
       if (pathname === "/api/v1/admin/member-image" && request.method === "POST") {
-        if (user.role !== "super") { send(403, { error: "Admin nhỏ không được sửa thành viên." }); return true; }
+        if (user.role !== "super" && !adminCampus(user)) { send(403, { error: "Tài khoản này không được sửa thành viên." }); return true; }
         const image = await uploadImage(await readBody(request, maxUploadBodyBytes), "member");
         if (!image) {
           send(400, { error: "Không xử lý được ảnh. Chọn ảnh JPG, PNG, WebP hoặc HEIC dưới 20 MB và thử lại." });
@@ -394,8 +448,22 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         return true;
       }
       if (pathname === "/api/v1/admin/data" && request.method === "GET") {
-        const [members, posts, popup] = await Promise.all([user.role === "super" ? getFile("members") : null, getFile("posts"), getFile("popup")]);
-        send(200, { members, posts, popup, username: user.username, role: user.role, accountType: user.source, mfaEnabled: Boolean(user.mfaSecret) });
+        const campus = adminCampus(user);
+        const [allMembers, allPosts, popupDocument] = await Promise.all([
+          user.role === "super" || campus ? getFile("members") : null,
+          getFile("posts"),
+          getFile("popup"),
+        ]);
+        const members = allMembers && campus
+          ? { ...allMembers, data: allMembers.data.filter((member) => postCampus(member) === campus).map((member) => ({ ...member, campus })) }
+          : allMembers;
+        const posts = campus
+          ? { ...allPosts, data: allPosts.data.filter((post) => postCampus(post) === campus).map((post) => ({ ...post, campus })) }
+          : allPosts;
+        const popup = campus
+          ? { ...popupDocument, data: popupForCampus(popupDocument.data, campus) }
+          : popupDocument;
+        send(200, { members, posts, popup, username: user.username, role: user.role, campus: campus ?? null, accountType: user.source, mfaEnabled: Boolean(user.mfaSecret) });
         return true;
       }
       if (pathname === "/api/v1/admin/login-logs" && request.method === "GET") {
@@ -406,8 +474,11 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       }
       if (pathname === "/api/v1/admin/posts" && request.method === "POST") {
         const body = await readBody(request);
-        if (!validPost(body?.post) || postStatus(body.post) === "trash") { send(400, { error: "Bài đăng không hợp lệ." }); return true; }
-        const post = { ...body.post, campus: postCampus(body.post), status: postStatus(body.post), history: [], createdBy: user.username, updatedAt: new Date(now()).toISOString() };
+        const campus = adminCampus(user);
+        if (!validPost(body?.post) || postStatus(body.post) === "trash" || (campus && postCampus(body.post) !== campus)) {
+          send(400, { error: "Bài đăng không hợp lệ hoặc không thuộc campus được cấp quyền." }); return true;
+        }
+        const post = { ...body.post, campus: campus ?? postCampus(body.post), status: postStatus(body.post), history: [], createdBy: user.username, updatedAt: new Date(now()).toISOString() };
         for (let attempt = 0; attempt < 3; attempt++) {
           const current = await getFile("posts");
           if (current.data.some((item) => item.id === post.id)) {
@@ -422,16 +493,20 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       const postToDelete = /^\/api\/v1\/admin\/posts\/([a-zA-Z0-9_-]{1,120})$/.exec(pathname);
       if (postToDelete && request.method === "PATCH") {
         const body = await readBody(request);
-        if (!validPost(body?.post) || body.post.id !== postToDelete[1] || postStatus(body.post) === "trash") {
+        const campus = adminCampus(user);
+        if (!validPost(body?.post) || body.post.id !== postToDelete[1] || postStatus(body.post) === "trash" ||
+            (campus && postCampus(body.post) !== campus)) {
           send(400, { error: "Bài đăng không hợp lệ." }); return true;
         }
         for (let attempt = 0; attempt < 3; attempt++) {
           const current = await getFile("posts");
           const index = current.data.findIndex((item) => item.id === postToDelete[1]);
-          if (index < 0 || postStatus(current.data[index]) === "trash") { send(404, { error: "Không tìm thấy bài cần sửa." }); return true; }
+          if (index < 0 || postStatus(current.data[index]) === "trash" || (campus && postCampus(current.data[index]) !== campus)) {
+            send(404, { error: "Không tìm thấy bài cần sửa trong campus được cấp quyền." }); return true;
+          }
           const previous = current.data[index];
           const history = [...(previous.history ?? []), postSnapshot(previous, user.username, new Date(now()).toISOString())].slice(-20);
-          const post = { ...body.post, campus: postCampus(body.post), status: postStatus(body.post), createdBy: previous.createdBy, history, updatedAt: new Date(now()).toISOString() };
+          const post = { ...body.post, campus: campus ?? postCampus(body.post), status: postStatus(body.post), createdBy: previous.createdBy, history, updatedAt: new Date(now()).toISOString() };
           try {
             const sha = await saveFile("posts", current.data.with(index, post), current.sha, "Edit Faerie News");
             send(200, { sha, post }); return true;
@@ -440,10 +515,11 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       }
       const restorePost = /^\/api\/v1\/admin\/posts\/([a-zA-Z0-9_-]{1,120})\/restore$/.exec(pathname);
       if (restorePost && request.method === "POST") {
-        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được khôi phục bài." }); return true; }
+        const campus = adminCampus(user);
+        if (user.role !== "super" && !campus) { send(403, { error: "Tài khoản này không được khôi phục bài." }); return true; }
         for (let attempt = 0; attempt < 3; attempt++) {
           const current = await getFile("posts");
-          const index = current.data.findIndex((item) => item.id === restorePost[1] && postStatus(item) === "trash");
+          const index = current.data.findIndex((item) => item.id === restorePost[1] && postStatus(item) === "trash" && (!campus || postCampus(item) === campus));
           if (index < 0) { send(404, { error: "Không tìm thấy bài trong thùng rác." }); return true; }
           const post = { ...current.data[index], status: "draft", updatedAt: new Date(now()).toISOString() };
           try {
@@ -453,10 +529,11 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
         }
       }
       if (postToDelete && request.method === "DELETE") {
-        if (user.role !== "super") { send(403, { error: "Chỉ admin lớn được xóa bài đăng." }); return true; }
+        const campus = adminCampus(user);
+        if (user.role !== "super" && !campus) { send(403, { error: "Tài khoản này không được xóa bài đăng." }); return true; }
         for (let attempt = 0; attempt < 3; attempt++) {
           const current = await getFile("posts");
-          const index = current.data.findIndex((post) => post.id === postToDelete[1] && postStatus(post) !== "trash");
+          const index = current.data.findIndex((post) => post.id === postToDelete[1] && postStatus(post) !== "trash" && (!campus || postCampus(post) === campus));
           if (index < 0) { send(404, { error: "Không tìm thấy bài đăng trong database." }); return true; }
           const post = { ...current.data[index], status: "trash", updatedAt: new Date(now()).toISOString() };
           try {
@@ -467,9 +544,14 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
       }
       const kind = pathname === "/api/v1/admin/members" ? "members" : pathname === "/api/v1/admin/posts" ? "posts" : pathname === "/api/v1/admin/popup" ? "popup" : null;
       if (kind && request.method === "PUT") {
-        if (user.role !== "super" && kind !== "popup") { send(403, { error: "Admin nhỏ chỉ được đăng bài và chỉnh popup sự kiện." }); return true; }
+        const campus = adminCampus(user);
+        if (user.role !== "super" && !campus && kind !== "popup") { send(403, { error: "Admin nhỏ chỉ được đăng bài và chỉnh popup sự kiện." }); return true; }
         const body = await readBody(request);
-        const validData = kind === "popup" ? validPopupDocument(body?.data) : Array.isArray(body?.data) && body.data.every((item) => item && typeof item === "object" && !Array.isArray(item));
+        const validData = campus && kind === "popup"
+          ? validPopup(body?.data)
+          : kind === "popup"
+            ? validPopupDocument(body?.data)
+            : Array.isArray(body?.data) && body.data.every((item) => item && typeof item === "object" && !Array.isArray(item));
         if (!body || !validData ||
             typeof body.sha !== "string" || !/^[a-f0-9]{40}$/.test(body.sha)) {
           send(400, { error: "Dữ liệu lưu không hợp lệ." });
@@ -480,7 +562,16 @@ export function createAdminApi({ env = process.env, fetchImpl = fetch, now = () 
           send(409, { error: "Dữ liệu đã thay đổi. Hãy tải lại trang." });
           return true;
         }
-        const sha = await saveFile(kind, body.data, current.sha, kind === "members" ? "Update Faerie members" : kind === "posts" ? "Publish Faerie News" : "Update Faerie event popup");
+        let data = body.data;
+        if (campus && kind !== "popup") {
+          if (!body.data.every((item) => postCampus(item) === campus)) {
+            send(400, { error: "Chỉ được lưu dữ liệu thuộc campus Quy Nhơn." }); return true;
+          }
+          data = [...current.data.filter((item) => postCampus(item) !== campus), ...body.data];
+        } else if (campus) {
+          data = updateCampusPopup(current.data, campus, body.data);
+        }
+        const sha = await saveFile(kind, data, current.sha, kind === "members" ? "Update Faerie members" : kind === "posts" ? "Publish Faerie News" : "Update Faerie event popup");
         send(200, { sha });
         return true;
       }
