@@ -115,7 +115,7 @@ test("database admin roles allow publishing but reserve account creation and pos
     assert.equal(documents.popup["quy-nhon"].title, "Quy Nhơn");
 
     const qnPost = {
-      id: "d93fbd10-7a48-467b-8de1-d0401a247550", campus: "quy-nhon", status: "draft",
+      id: "e1f2e3d4-5a6b-47c8-9d0e-112233445566", campus: "quy-nhon", status: "draft",
       date: "13.10", year: "2026", title: "Tin Quy Nhơn", description: "Nội dung thử",
       bodyBlocks: [{ runs: [{ text: "Nội dung thử" }] }], tag: "NEWS", location: "FPTU Quy Nhơn", images: [],
     };

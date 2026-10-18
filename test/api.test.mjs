@@ -53,7 +53,7 @@ test("member and event data match the current 2026 site", async () => {
   const popup = await (await fetch(`${baseUrl}/api/v1/popup`)).json();
   assert.equal(popup.popup.enabled, popupConfig.enabled);
   assert.equal(popup.popup.title, popupConfig.title);
-  assert.equal(popup.popup.image, new URL(popupConfig.image, "https://faeriehouse.onrender.com/").href);
+  assert.equal(popup.popup.image, popupConfig.image ? new URL(popupConfig.image, "https://faeriehouse.onrender.com/").href : "");
 });
 
 test("new popup images are served from GitHub before Render redeploys", async () => {
