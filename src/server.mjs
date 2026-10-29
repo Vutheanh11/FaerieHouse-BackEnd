@@ -2,7 +2,7 @@ import { createServer as createHttpServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { events2026, members2026, popupConfig, posts } from "./data.mjs";
+import { events2026, events2026QuyNhon, members2026, popupConfig, posts } from "./data.mjs";
 import { createAdminApi } from "./admin.mjs";
 import { createDatabase } from "./database.mjs";
 
@@ -115,7 +115,7 @@ export function createApiServer({ adminOptions, database, imageFetch = fetch, im
         return;
       }
       const currentPosts = store ? (await store.getFile("posts")).data : newsPosts;
-      const localEvents = campus === "hcm" ? events2026 : [];
+      const localEvents = campus === "hcm" ? events2026 : events2026QuyNhon;
       const publicPosts = currentPosts.filter((item) => campusOf(item) === campus && (item.status ?? "published") === "published");
       const allItems = pathname.endsWith("/events") ? localEvents : [...publicPosts, ...localEvents];
       const availableYears = [...new Set(allItems.map((item) => String(item.year)))].sort((first, second) => Number(second) - Number(first));

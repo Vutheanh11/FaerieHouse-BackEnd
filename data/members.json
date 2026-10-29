@@ -360,5 +360,132 @@
     "facebookUrl": "https://www.facebook.com/share/1YWt6y2N1C/?mibextid=wwXIfr",
     "interests": "Coder",
     "message": "Chúc dự án thành công tốt đẹp"
+  },
+  {
+    "name": "Lê Việt Phương",
+    "fullName": "Lê Việt Phương",
+    "title": "Mentor",
+    "group": "Mentor",
+    "photo": "images/members/2026/cards/quynhon/Mentor_PhuongLV.webp",
+    "introduction": "Mentor nhà Faerie Quy Nhơn 2026",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Nguyễn Thị Yến Nhi",
+    "fullName": "Nguyễn Thị Yến Nhi",
+    "title": "Supporter",
+    "group": "Supporter",
+    "photo": "images/members/2026/cards/quynhon/Supportive Mentor_NhiLTY.webp",
+    "introduction": "Supportive Mentor nhà Faerie Quy Nhơn 2026",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Đoàn Đệ",
+    "fullName": "Đoàn Đệ",
+    "title": "Supporter",
+    "group": "Supporter",
+    "photo": "images/members/2026/cards/quynhon/DoanDe.webp",
+    "introduction": "Supporter nhiệt huyết nhà Faerie Quy Nhơn",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Hồ Lê Hoàng Nhật",
+    "fullName": "Hồ Lê Hoàng Nhật",
+    "title": "Leader Nhà",
+    "group": "Leadership",
+    "photo": "images/members/2026/cards/quynhon/HoangNhat.webp",
+    "message": "Đoàn kết là sức mạnh!",
+    "introduction": "Leader nhà Faerie Quy Nhơn 2026",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Nguyễn Ánh Tín",
+    "fullName": "Nguyễn Ánh Tín",
+    "title": "Sub Leader Nhà",
+    "group": "Leadership",
+    "photo": "images/members/2026/cards/quynhon/AnhTin.webp",
+    "message": "Cùng nhau tạo nên những điều kỳ diệu",
+    "introduction": "Sub Leader nhà Faerie Quy Nhơn 2026",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Tô Lương Đình Hậu",
+    "fullName": "Tô Lương Đình Hậu",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/DinhHau.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Đỗ Thị Thanh Tâm",
+    "fullName": "Đỗ Thị Thanh Tâm",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/Thanh_Tam.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Trần Thanh Tâm",
+    "fullName": "Trần Thanh Tâm",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/TranTam.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Nguyễn Thảo Gia Hân",
+    "fullName": "Nguyễn Thảo Gia Hân",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/GiaHan.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Nguyễn Gia Phúc",
+    "fullName": "Nguyễn Gia Phúc",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/GiaPhuc.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Nguyễn Lê Nhật",
+    "fullName": "Nguyễn Lê Nhật",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/LeNhat.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Trần Thanh Thanh",
+    "fullName": "Trần Thanh Thanh",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/ThanhThanh.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Tiến Lợi",
+    "fullName": "Nguyễn Tiến Lợi",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/TienLoi.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Trần Bảo Trúc Giang",
+    "fullName": "Trần Bảo Trúc Giang",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/TrucGiang.webp",
+    "campus": "quy-nhon"
+  },
+  {
+    "name": "Nguyễn Trung Hiếu",
+    "fullName": "Nguyễn Trung Hiếu",
+    "title": "Member",
+    "group": "Member",
+    "photo": "images/members/2026/cards/quynhon/TrungHieu.webp",
+    "campus": "quy-nhon"
   }
 ]
